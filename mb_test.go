@@ -74,6 +74,67 @@ func TestLimits(t *testing.T) {
 
 }
 
+func TestMinMax(t *testing.T) {
+	b := New(0)
+
+	var resCh = make(chan []interface{})
+	var quit = make(chan bool)
+	go func() {
+		var result []interface{}
+		for {
+			if result = b.WaitMinMax(2, 3); len(result) == 0 {
+				quit <- true
+				return
+			} else {
+				resCh <- result
+			}
+		}
+	}()
+
+	b.Add(1)
+	b.Add(2)
+	result := <-resCh
+	if len(result) != 2 {
+		t.Errorf("Unexpected result: %v", result)
+	}
+	b.Add(3, 4, 5, 6)
+	result = <-resCh
+	if len(result) != 3 {
+		t.Errorf("Unexpected result: %v", result)
+	}
+	b.Add(7)
+	result = <-resCh
+	if len(result) != 2 {
+		t.Errorf("Unexpected result: %v", result)
+	}
+	b.Close()
+	<-quit
+}
+
+func TestGetAll(t *testing.T) {
+	var b = New(0)
+	var quit = make(chan bool)
+	go func() {
+		for {
+			if r := b.WaitMinMax(3, 3); len(r) == 0 {
+				quit <- true
+				return
+			}
+		}
+	}()
+
+	b.Add(2, 2)
+	if res := b.GetAll(); len(res) != 2 {
+		t.Errorf("Unexpected result: %v", res)
+	}
+	b.Add(2, 2)
+	b.Close()
+	if res := b.GetAll(); len(res) != 2 {
+		t.Errorf("Unexpected result: %v", res)
+	}
+	<-quit
+}
+
 func TestAsync(t *testing.T) {
 	test(t, New(0), 4, 4, time.Millisecond*5)
 	test(t, New(10), 4, 4, time.Millisecond*5)
@@ -126,4 +187,46 @@ func test(t *testing.T, b *MB, sc, rc int, dur time.Duration) {
 	}
 	t.Logf("Added: %d", addCount)
 	t.Logf("Recieved: %d", recieveCount)
+}
+
+func BenchmarkAdd(b *testing.B) {
+	mb := New(0)
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		mb.Add(true)
+	}
+}
+
+func BenchmarkWait0(b *testing.B) {
+	benchmarkWait(b, 0)
+}
+func BenchmarkWait1(b *testing.B) {
+	benchmarkWait(b, 1)
+}
+func BenchmarkWait10(b *testing.B) {
+	benchmarkWait(b, 10)
+}
+func BenchmarkWait100(b *testing.B) {
+	benchmarkWait(b, 100)
+}
+func BenchmarkWait1000(b *testing.B) {
+	benchmarkWait(b, 1000)
+}
+func benchmarkWait(b *testing.B, max int) {
+	mb := New(1000)
+	b.StopTimer()
+	b.ReportAllocs()
+	go func() {
+		for {
+			if e := mb.Add(true); e != nil {
+				return
+			}
+		}
+	}()
+	b.StartTimer()
+	for i := 0; i < b.N; i++ {
+		mb.WaitMax(max)
+	}
+	b.StopTimer()
+	mb.Close()
 }

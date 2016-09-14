@@ -41,16 +41,30 @@ type MB struct {
 // Returning array of accumulated messages
 // When queue will be closed length of array will be 0
 func (mb *MB) Wait() (msgs []interface{}) {
-	return mb.WaitMax(-1)
+	return mb.WaitMinMax(0, 0)
 }
 
 // WaitMax it's Wait with limit of maximum returning array size
 func (mb *MB) WaitMax(max int) (msgs []interface{}) {
+	return mb.WaitMinMax(0, max)
+}
+
+// WaitMin it's Wait with limit of minimum returning array size
+func (mb *MB) WaitMin(min int) (msgs []interface{}) {
+	return mb.WaitMinMax(min, 0)
+}
+
+// WaitMinMax it's Wait with limit of minimum and maximum returning array size
+// value < 0 means no limit
+func (mb *MB) WaitMinMax(min, max int) (msgs []interface{}) {
+	if min <= 0 {
+		min = 1
+	}
 	mb.cond.L.Lock()
-	defer mb.cond.L.Unlock()
 try:
-	for len(mb.msgs) == 0 {
+	if len(mb.msgs) < min {
 		if mb.closed {
+			mb.cond.L.Unlock()
 			return
 		}
 		mb.cond.Wait()
@@ -66,6 +80,20 @@ try:
 	mb.getCount++
 	mb.getMsgsCount += int64(len(msgs))
 	mb.unlockAdd()
+	mb.cond.L.Unlock()
+	return
+}
+
+// GetAll return all messages and flush queue
+// Works on closed queue
+func (mb *MB) GetAll() (msgs []interface{}) {
+	mb.cond.L.Lock()
+	msgs = mb.msgs
+	mb.msgs = make([]interface{}, 0)
+	mb.getCount++
+	mb.getMsgsCount += int64(len(msgs))
+	mb.unlockAdd()
+	mb.cond.L.Unlock()
 	return
 }
 
