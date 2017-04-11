@@ -2,6 +2,31 @@
 This package very useful for organizing batch messages.   
 Can help you create batch inserts to a database for example. Thread safe and well tested.   
 
+```Go
+// create new queue object
+batch := mb.New(0)
+
+// add new message to the queue
+batch.Add(msg)
+
+// wait until anybody add message/messages
+// will return the slice of all queued messages. ([]interface{})
+messages := batch.Wait()
+
+// wait until count of messages will be more than 10
+// if we have more than 100 messages, will be returned only 100
+messages := batch.WaitMinMax(10, 100)
+
+// when we have 0 messages returned that means the queue is closed.
+if len(messages) == 0 {
+	return
+}
+
+// close queue
+// if the queue has messages all receivers will get remaining data.
+batch.Close()
+```
+
 ### Docs ###
 https://godoc.org/gopkg.in/cheggaaa/mb.v1
 ### Installation ###
