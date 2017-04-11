@@ -1,4 +1,7 @@
 # Message batching queue
+This package very useful for organizing batch messages.   
+Can help you create batch inserts to a database for example. Thread safe and well tested.   
+
 ### Docs ###
 https://godoc.org/gopkg.in/cheggaaa/mb.v1
 ### Installation ###
