@@ -217,7 +217,7 @@ func TestAsync(t *testing.T) {
 
 func test(t *testing.T, b *MB, sc, rc int, dur time.Duration) {
 	exit := make(chan bool)
-	var addCount, recieveCount int64
+	var addCount, receiveCount int64
 
 	// start add workers
 	for i := 0; i < sc; i++ {
@@ -241,7 +241,7 @@ func test(t *testing.T, b *MB, sc, rc int, dur time.Duration) {
 					exit <- true
 					return
 				}
-				atomic.AddInt64(&recieveCount, int64(len(msgs)))
+				atomic.AddInt64(&receiveCount, int64(len(msgs)))
 			}
 		}(i)
 	}
@@ -259,11 +259,11 @@ func test(t *testing.T, b *MB, sc, rc int, dur time.Duration) {
 		<-exit
 	}
 
-	if addCount != recieveCount {
-		t.Errorf("Add and recieve not equals: %v vs %v", addCount, recieveCount)
+	if addCount != receiveCount {
+		t.Errorf("Add and receive not equals: %v vs %v", addCount, receiveCount)
 	}
 	t.Logf("Added: %d", addCount)
-	t.Logf("Recieved: %d", recieveCount)
+	t.Logf("received: %d", receiveCount)
 }
 
 func BenchmarkAdd(b *testing.B) {
