@@ -85,9 +85,8 @@ func TestMinMax(t *testing.T) {
 			if result = b.WaitMinMax(2, 3); len(result) == 0 {
 				quit <- true
 				return
-			} else {
-				resCh <- result
 			}
+			resCh <- result
 		}
 	}()
 
