@@ -135,6 +135,78 @@ func TestGetAll(t *testing.T) {
 	<-quit
 }
 
+func TestPause(t *testing.T) {
+	b := New(10)
+	b.Add(1, 2, 3)
+	var result = make(chan int)
+	go func() {
+		for {
+			msgs := b.Wait()
+			result <- len(msgs)
+			if len(msgs) == 0 {
+				return
+			}
+		}
+	}()
+
+	select {
+	case l := <-result:
+		if l != 3 {
+			t.Errorf("Unexpected msgs len: %d vs %d", l, 3)
+		}
+	case <-time.After(time.Millisecond):
+		t.Error("Can't receive msgs")
+	}
+
+	b.Add(1, 2)
+	select {
+	case l := <-result:
+		if l != 2 {
+			t.Errorf("Unexpected msgs len: %d vs %d", l, 2)
+		}
+	case <-time.After(time.Millisecond):
+		t.Error("Can't receive msgs")
+	}
+	b.Pause()
+	b.Add(1, 2, 3, 4)
+	select {
+	case <-result:
+		t.Error("Pause do not work :-)")
+	case <-time.After(time.Millisecond):
+	}
+
+	b.Resume()
+	select {
+	case l := <-result:
+		if l != 4 {
+			t.Errorf("Unexpected msgs len: %d vs %d", l, 4)
+		}
+	case <-time.After(time.Millisecond):
+		t.Error("Resume do not work")
+	}
+
+	b.Pause()
+	b.Add(1)
+	select {
+	case <-result:
+		t.Error("Pause do not work :-)")
+	case <-time.After(time.Millisecond):
+	}
+
+	b.Close()
+	select {
+	case l := <-result:
+		if l != 0 {
+			t.Errorf("Unexpected msgs len: %d vs %d", l, 0)
+		}
+	case <-time.After(time.Millisecond):
+		t.Error("not closed")
+	}
+	if msgs := b.GetAll(); len(msgs) != 1 {
+		t.Errorf("Unexpected msgs len: %d vs %d", len(msgs), 1)
+	}
+}
+
 func TestAsync(t *testing.T) {
 	test(t, New(0), 4, 4, time.Millisecond*5)
 	test(t, New(10), 4, 4, time.Millisecond*5)
@@ -173,6 +245,11 @@ func test(t *testing.T, b *MB, sc, rc int, dur time.Duration) {
 			}
 		}(i)
 	}
+
+	time.Sleep(time.Microsecond * 10)
+	b.Pause()
+	time.Sleep(time.Millisecond)
+	b.Resume()
 
 	time.Sleep(dur)
 

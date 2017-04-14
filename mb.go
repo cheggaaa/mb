@@ -26,12 +26,13 @@ func New(size int) *MB {
 // Implements queue.
 // Based on condition variables
 type MB struct {
-	msgs   []interface{}
-	cond   *sync.Cond
-	size   int
-	wait   int
-	read   chan struct{}
-	closed bool
+	msgs []interface{}
+	cond *sync.Cond
+	size int
+	wait int
+	read chan struct{}
+
+	paused, closed bool
 
 	addCount, getCount         int64
 	addMsgsCount, getMsgsCount int64
@@ -62,7 +63,7 @@ func (mb *MB) WaitMinMax(min, max int) (msgs []interface{}) {
 	}
 	mb.cond.L.Lock()
 try:
-	if len(mb.msgs) < min {
+	if len(mb.msgs) < min || mb.paused {
 		if mb.closed {
 			mb.cond.L.Unlock()
 			return
@@ -123,8 +124,11 @@ add:
 	mb.msgs = append(mb.msgs, msgs...)
 	mb.addCount++
 	mb.addMsgsCount += int64(len(msgs))
+	paused := mb.paused
 	mb.cond.L.Unlock()
-	mb.cond.Signal()
+	if !paused {
+		mb.cond.Signal()
+	}
 	return
 }
 
@@ -134,6 +138,24 @@ func (mb *MB) unlockAdd() {
 			mb.read <- struct{}{}
 		}
 		mb.wait = 0
+	}
+}
+
+// Pause lock all "Wait" routines until call Resume
+func (mb *MB) Pause() {
+	mb.cond.L.Lock()
+	mb.paused = true
+	mb.cond.L.Unlock()
+}
+
+// Resume release all "Wait" routines
+func (mb *MB) Resume() {
+	mb.cond.L.Lock()
+	wasPaused := mb.paused
+	mb.paused = false
+	mb.cond.L.Unlock()
+	if wasPaused {
+		mb.cond.Broadcast()
 	}
 }
 
@@ -160,6 +182,7 @@ func (mb *MB) Stats() (addCount, addMsgsCount, getCount, getMsgsCount int64) {
 
 // Close closes the queue
 // All added messages will be available for Wait
+// When queue paused messages do not be released for Wait (use GetAll for fetching them)
 func (mb *MB) Close() (err error) {
 	mb.cond.L.Lock()
 	if mb.closed {
