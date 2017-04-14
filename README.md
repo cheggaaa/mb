@@ -103,7 +103,7 @@ func worker(name string, q *mb.MB, done chan bool) {
 		for _, msg := range msgs {
 			msgsForPrint += fmt.Sprintf("\t%s\n", msg)
 		}
-		fmt.Printf("Worker %s: %d messages recieved\n%s", name, len(msgs), msgsForPrint)
+		fmt.Printf("Worker %s: %d messages received\n%s", name, len(msgs), msgsForPrint)
 
 		// doing working, for example, send messages to remote server
 		time.Sleep(time.Second / 3)
