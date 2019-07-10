@@ -28,9 +28,9 @@ batch.Close()
 ```
 
 ### Docs ###
-https://godoc.org/gopkg.in/cheggaaa/mb.v1
+https://godoc.org/github.com/cheggaaa/mb
 ### Installation ###
-```go get -u gopkg.in/cheggaaa/mb.v1```
+```go get -u github.com/cheggaaa/mb```
 
 ### Example ###
 ```Go
@@ -40,7 +40,7 @@ import (
 	"fmt"
 	"time"
 
-	"gopkg.in/cheggaaa/mb.v1"
+	"github.com/cheggaaa/mb"
 )
 
 func main() {
