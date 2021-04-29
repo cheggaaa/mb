@@ -134,6 +134,16 @@ func TestGetAll(t *testing.T) {
 	<-quit
 }
 
+func TestTryAdd(t *testing.T) {
+	b := New(3)
+	if err := b.TryAdd(1, 2, 3); err != nil {
+		t.Errorf("unexpected err: %v", err)
+	}
+	if err := b.TryAdd(4); err != ErrOverflowed {
+		t.Errorf("unexpected err: %v; want ErrOverflowed", err)
+	}
+}
+
 func TestPause(t *testing.T) {
 	b := New(10)
 	b.Add(1, 2, 3)

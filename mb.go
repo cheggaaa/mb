@@ -7,10 +7,13 @@ import (
 )
 
 // ErrClosed is returned when you add message to closed queue
-var ErrClosed = errors.New("MB closed")
+var ErrClosed = errors.New("mb: MB closed")
 
 // ErrTooManyMessages means that adding more messages (at one call) than the limit
-var ErrTooManyMessages = errors.New("Too many messages")
+var ErrTooManyMessages = errors.New("mb: too many messages")
+
+// ErrOverflowed means new messages can't be added until there is free space in the queue
+var ErrOverflowed = errors.New("mb: overflowed")
 
 // New returns a new MB with given queue size.
 // size <= 0 means unlimited
@@ -120,6 +123,36 @@ add:
 		mb.cond.L.Unlock()
 		<-mb.read
 		goto add
+	}
+	mb.msgs = append(mb.msgs, msgs...)
+	mb.addCount++
+	mb.addMsgsCount += int64(len(msgs))
+	paused := mb.paused
+	mb.cond.L.Unlock()
+	if !paused {
+		mb.cond.Signal()
+	}
+	return
+}
+
+// TryAdd - adds new messages to queue.
+// When queue is closed - returning ErrClosed
+// When count messages bigger then queue size - returning ErrTooManyMessages
+// When the queue is full - returning ErrOverflowed
+func (mb *MB) TryAdd(msgs ...interface{}) (err error) {
+	mb.cond.L.Lock()
+	// check for close
+	if mb.closed {
+		mb.cond.L.Unlock()
+		return ErrClosed
+	}
+	if mb.size > 0 && len(mb.msgs)+len(msgs) > mb.size {
+		if len(msgs) > mb.size {
+			mb.cond.L.Unlock()
+			return ErrTooManyMessages
+		}
+		mb.cond.L.Unlock()
+		return ErrOverflowed
 	}
 	mb.msgs = append(mb.msgs, msgs...)
 	mb.addCount++
