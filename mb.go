@@ -17,8 +17,8 @@ var ErrOverflowed = errors.New("mb: overflowed")
 
 // New returns a new MB with given queue size.
 // size <= 0 means unlimited
-func New(size int) *MB {
-	return &MB{
+func New[T any](elType T, size int) *MB[T] {
+	return &MB[T]{
 		cond: sync.NewCond(&sync.Mutex{}),
 		size: size,
 		read: make(chan struct{}),
@@ -28,8 +28,8 @@ func New(size int) *MB {
 // MB - message batching object
 // Implements queue.
 // Based on condition variables
-type MB struct {
-	msgs []interface{}
+type MB[T any] struct {
+	msgs []T
 	cond *sync.Cond
 	size int
 	wait int
@@ -44,23 +44,23 @@ type MB struct {
 // Wait until anybody add message
 // Returning array of accumulated messages
 // When queue will be closed length of array will be 0
-func (mb *MB) Wait() (msgs []interface{}) {
+func (mb *MB[T]) Wait() (msgs []T) {
 	return mb.WaitMinMax(0, 0)
 }
 
 // WaitMax it's Wait with limit of maximum returning array size
-func (mb *MB) WaitMax(max int) (msgs []interface{}) {
+func (mb *MB[T]) WaitMax(max int) (msgs []T) {
 	return mb.WaitMinMax(0, max)
 }
 
 // WaitMin it's Wait with limit of minimum returning array size
-func (mb *MB) WaitMin(min int) (msgs []interface{}) {
+func (mb *MB[T]) WaitMin(min int) (msgs []T) {
 	return mb.WaitMinMax(min, 0)
 }
 
 // WaitMinMax it's Wait with limit of minimum and maximum returning array size
 // value < 0 means no limit
-func (mb *MB) WaitMinMax(min, max int) (msgs []interface{}) {
+func (mb *MB[T]) WaitMinMax(min, max int) (msgs []T) {
 	if min <= 0 {
 		min = 1
 	}
@@ -79,7 +79,7 @@ try:
 		mb.msgs = mb.msgs[max:]
 	} else {
 		msgs = mb.msgs
-		mb.msgs = make([]interface{}, 0)
+		mb.msgs = make([]T, 0)
 	}
 	mb.getCount++
 	mb.getMsgsCount += int64(len(msgs))
@@ -90,10 +90,10 @@ try:
 
 // GetAll return all messages and flush queue
 // Works on closed queue
-func (mb *MB) GetAll() (msgs []interface{}) {
+func (mb *MB[T]) GetAll() (msgs []T) {
 	mb.cond.L.Lock()
 	msgs = mb.msgs
-	mb.msgs = make([]interface{}, 0)
+	mb.msgs = make([]T, 0)
 	mb.getCount++
 	mb.getMsgsCount += int64(len(msgs))
 	mb.unlockAdd()
@@ -105,7 +105,7 @@ func (mb *MB) GetAll() (msgs []interface{}) {
 // When queue is closed - returning ErrClosed
 // When count messages bigger then queue size - returning ErrTooManyMessages
 // When the queue is full - wait until will free place
-func (mb *MB) Add(msgs ...interface{}) (err error) {
+func (mb *MB[T]) Add(msgs ...T) (err error) {
 add:
 	mb.cond.L.Lock()
 	// check for close
@@ -139,7 +139,7 @@ add:
 // When queue is closed - returning ErrClosed
 // When count messages bigger then queue size - returning ErrTooManyMessages
 // When the queue is full - returning ErrOverflowed
-func (mb *MB) TryAdd(msgs ...interface{}) (err error) {
+func (mb *MB[T]) TryAdd(msgs ...T) (err error) {
 	mb.cond.L.Lock()
 	// check for close
 	if mb.closed {
@@ -165,7 +165,7 @@ func (mb *MB) TryAdd(msgs ...interface{}) (err error) {
 	return
 }
 
-func (mb *MB) unlockAdd() {
+func (mb *MB[T]) unlockAdd() {
 	if mb.wait > 0 {
 		for i := 0; i < mb.wait; i++ {
 			mb.read <- struct{}{}
@@ -175,14 +175,14 @@ func (mb *MB) unlockAdd() {
 }
 
 // Pause lock all "Wait" routines until call Resume
-func (mb *MB) Pause() {
+func (mb *MB[T]) Pause() {
 	mb.cond.L.Lock()
 	mb.paused = true
 	mb.cond.L.Unlock()
 }
 
 // Resume release all "Wait" routines
-func (mb *MB) Resume() {
+func (mb *MB[T]) Resume() {
 	mb.cond.L.Lock()
 	wasPaused := mb.paused
 	mb.paused = false
@@ -193,7 +193,7 @@ func (mb *MB) Resume() {
 }
 
 // Len returning current size of queue
-func (mb *MB) Len() (l int) {
+func (mb *MB[T]) Len() (l int) {
 	mb.cond.L.Lock()
 	l = len(mb.msgs)
 	mb.cond.L.Unlock()
@@ -205,7 +205,7 @@ func (mb *MB) Len() (l int) {
 // addMsgsCount - count of added messages
 // getCount - count of calls Wait
 // getMsgsCount - count of issued messages
-func (mb *MB) Stats() (addCount, addMsgsCount, getCount, getMsgsCount int64) {
+func (mb *MB[T]) Stats() (addCount, addMsgsCount, getCount, getMsgsCount int64) {
 	mb.cond.L.Lock()
 	addCount, addMsgsCount, getCount, getMsgsCount =
 		mb.addCount, mb.addMsgsCount, mb.getCount, mb.getMsgsCount
@@ -216,7 +216,7 @@ func (mb *MB) Stats() (addCount, addMsgsCount, getCount, getMsgsCount int64) {
 // Close closes the queue
 // All added messages will be available for Wait
 // When queue paused messages do not be released for Wait (use GetAll for fetching them)
-func (mb *MB) Close() (err error) {
+func (mb *MB[T]) Close() (err error) {
 	mb.cond.L.Lock()
 	if mb.closed {
 		mb.cond.L.Unlock()
