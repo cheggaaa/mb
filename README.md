@@ -4,7 +4,7 @@ Can help you create batch inserts to a database for example. Thread safe and wel
 
 ```Go
 // create new queue object
-batch := mb.New(0)
+batch := mb.New((any)(nil), 0)
 
 // add new message to the queue
 batch.Add(msg)
@@ -30,7 +30,7 @@ batch.Close()
 ### Docs ###
 https://godoc.org/github.com/cheggaaa/mb
 ### Installation ###
-```go get -u github.com/cheggaaa/mb```
+```go get -u github.com/cheggaaa/mb/v2```
 
 ### Example ###
 ```Go
@@ -40,12 +40,12 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/cheggaaa/mb"
+	"github.com/cheggaaa/mb/v2"
 )
 
 func main() {
 	// create the queue with 10 items capacity
-	q := mb.New(10)
+	q := mb.New("", 10)
 
 	// create the channel for showing when all work will be done
 	done := make(chan bool)
@@ -70,7 +70,7 @@ func main() {
 	}
 }
 
-func publisher(name string, q *mb.MB) {
+func publisher(name string, q *mb.MB[string]) {
 	fmt.Printf("Publisher %s: started\n", name)
 	var i int
 	for {
@@ -88,7 +88,7 @@ func publisher(name string, q *mb.MB) {
 	fmt.Printf("Publisher %s: closed\n", name)
 }
 
-func worker(name string, q *mb.MB, done chan bool) {
+func worker(name string, q *mb.MB[string], done chan bool) {
 	fmt.Printf("Worker %s: started\n", name)
 	for {
 		// getting messages
