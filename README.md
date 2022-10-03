@@ -10,7 +10,7 @@ batch := mb.New((any)(nil), 0)
 batch.Add(msg)
 
 // wait until anybody add message/messages
-// will return the slice of all queued messages. ([]interface{})
+// will return the slice of all queued messages. ([]T)
 messages := batch.Wait()
 
 // wait until count of messages will be more than 10
@@ -28,7 +28,7 @@ batch.Close()
 ```
 
 ### Docs ###
-https://godoc.org/github.com/cheggaaa/mb
+https://godoc.org/github.com/cheggaaa/mb/v2
 ### Installation ###
 ```go get -u github.com/cheggaaa/mb/v2```
 
