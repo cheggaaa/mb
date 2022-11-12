@@ -1,6 +1,8 @@
 package mb
 
 import (
+	"math/rand"
+	_ "net/http/pprof"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -216,6 +218,46 @@ func TestPause(t *testing.T) {
 	}
 }
 
+func TestPriority(t *testing.T) {
+	type result struct {
+		priority float64
+		count    int
+	}
+	var resultsCh = make(chan result)
+	var n = 3
+	mb := New(1, 0)
+
+	for i := 0; i < n; i++ {
+		go func(p float64) {
+			var count int
+			for {
+				if l := len(mb.PriorityWaitMinMax(p, 1, 1)); l != 0 {
+					count += l
+					//fmt.Println("receive", l, p)
+					time.Sleep(time.Millisecond * 10)
+
+				} else {
+					break
+				}
+			}
+			resultsCh <- result{priority: p, count: count}
+		}(float64(i))
+	}
+	time.Sleep(time.Millisecond * 10)
+
+	for i := 0; i < 100; i++ {
+		mb.Add(i)
+		time.Sleep(time.Millisecond * 5)
+	}
+	mb.Close()
+	resMap := make(map[float64]int)
+	for i := 0; i < n; i++ {
+		res := <-resultsCh
+		resMap[res.priority] = res.count
+	}
+	t.Log(resMap)
+}
+
 func TestAsync(t *testing.T) {
 	test(t, New(0, 0), 4, 4, time.Millisecond*5)
 	test(t, New(0, 10), 4, 4, time.Millisecond*5)
@@ -300,8 +342,6 @@ func BenchmarkWait1000(b *testing.B) {
 }
 func benchmarkWait(b *testing.B, max int) {
 	mb := New(true, 1000)
-	b.StopTimer()
-	b.ReportAllocs()
 	go func() {
 		for {
 			if e := mb.Add(true); e != nil {
@@ -309,10 +349,37 @@ func benchmarkWait(b *testing.B, max int) {
 			}
 		}
 	}()
-	b.StartTimer()
+	b.ReportAllocs()
+	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		mb.WaitMax(max)
 	}
 	b.StopTimer()
 	mb.Close()
+}
+
+func BenchmarkWaitPriority(b *testing.B) {
+	mb := New(true, 1000)
+	defer mb.Close()
+
+	var receivedCh = make(chan struct{})
+
+	for i := 0; i < 100; i++ {
+		go func(p float64) {
+			for {
+				if msgs := mb.PriorityWaitMinMax(p, 1, 1); len(msgs) == 0 {
+					return
+				} else {
+					receivedCh <- struct{}{}
+				}
+			}
+		}(rand.Float64())
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		mb.Add(true)
+		<-receivedCh
+	}
 }
