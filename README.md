@@ -45,7 +45,7 @@ import (
 
 func main() {
 	// create the queue with 10 items capacity
-	q := mb.New("", 10)
+	q := mb.New[int](10)
 
 	// create the channel for showing when all work will be done
 	done := make(chan bool)

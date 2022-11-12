@@ -19,7 +19,7 @@ var defaultPriority float64 = 1
 
 // New returns a new MB with given queue size.
 // size <= 0 means unlimited
-func New[T any](elType T, size int) *MB[T] {
+func New[T any](size int) *MB[T] {
 	mb := &MB[T]{
 		size: size,
 	}

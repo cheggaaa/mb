@@ -9,7 +9,7 @@ import (
 )
 
 func TestSync(t *testing.T) {
-	b := New(0, 0)
+	b := New[int](0)
 	if e := b.Add(1); e != nil {
 		t.Error(e)
 	}
@@ -50,7 +50,7 @@ func TestSync(t *testing.T) {
 }
 
 func TestLimits(t *testing.T) {
-	b := New(0, 5)
+	b := New[int](5)
 	if e := b.Add(1, 2); e != nil {
 		t.Errorf("Unexpected error value: %v", e)
 	}
@@ -77,7 +77,7 @@ func TestLimits(t *testing.T) {
 }
 
 func TestMinMax(t *testing.T) {
-	b := New(0, 0)
+	b := New[int](0)
 
 	var resCh = make(chan []int)
 	var quit = make(chan bool)
@@ -113,7 +113,7 @@ func TestMinMax(t *testing.T) {
 }
 
 func TestGetAll(t *testing.T) {
-	var b = New(0, 0)
+	var b = New[int](0)
 	var quit = make(chan bool)
 	go func() {
 		for {
@@ -137,7 +137,7 @@ func TestGetAll(t *testing.T) {
 }
 
 func TestTryAdd(t *testing.T) {
-	b := New(0, 3)
+	b := New[int](3)
 	if err := b.TryAdd(1, 2, 3); err != nil {
 		t.Errorf("unexpected err: %v", err)
 	}
@@ -147,7 +147,7 @@ func TestTryAdd(t *testing.T) {
 }
 
 func TestPause(t *testing.T) {
-	b := New(0, 10)
+	b := New[int](10)
 	b.Add(1, 2, 3)
 	var result = make(chan int)
 	go func() {
@@ -225,7 +225,7 @@ func TestPriority(t *testing.T) {
 	}
 	var resultsCh = make(chan result)
 	var n = 3
-	mb := New(1, 0)
+	mb := New[int](0)
 
 	for i := 0; i < n; i++ {
 		go func(p float64) {
@@ -259,11 +259,11 @@ func TestPriority(t *testing.T) {
 }
 
 func TestAsync(t *testing.T) {
-	test(t, New(0, 0), 4, 4, time.Millisecond*5)
-	test(t, New(0, 10), 4, 4, time.Millisecond*5)
-	test(t, New(0, 100), 1, 4, time.Millisecond*5)
-	test(t, New(0, 100), 4, 1, time.Millisecond*5)
-	test(t, New(0, 1000), 16, 16, time.Millisecond*30)
+	test(t, New[int](0), 4, 4, time.Millisecond*5)
+	test(t, New[int](10), 4, 4, time.Millisecond*5)
+	test(t, New[int](100), 1, 4, time.Millisecond*5)
+	test(t, New[int](100), 4, 1, time.Millisecond*5)
+	test(t, New[int](1000), 16, 16, time.Millisecond*30)
 }
 
 func test(t *testing.T, b *MB[int], sc, rc int, dur time.Duration) {
@@ -318,7 +318,7 @@ func test(t *testing.T, b *MB[int], sc, rc int, dur time.Duration) {
 }
 
 func BenchmarkAdd(b *testing.B) {
-	mb := New(true, 0)
+	mb := New[bool](0)
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		mb.Add(true)
@@ -341,7 +341,7 @@ func BenchmarkWait1000(b *testing.B) {
 	benchmarkWait(b, 1000)
 }
 func benchmarkWait(b *testing.B, max int) {
-	mb := New(true, 1000)
+	mb := New[bool](1000)
 	go func() {
 		for {
 			if e := mb.Add(true); e != nil {
@@ -359,7 +359,7 @@ func benchmarkWait(b *testing.B, max int) {
 }
 
 func BenchmarkWaitPriority(b *testing.B) {
-	mb := New(true, 1000)
+	mb := New[bool](1000)
 	defer mb.Close()
 
 	var receivedCh = make(chan struct{})
