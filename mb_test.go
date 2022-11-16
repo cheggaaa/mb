@@ -1,32 +1,40 @@
 package mb
 
 import (
+	"context"
 	"math/rand"
-	_ "net/http/pprof"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
+var ctx = context.Background()
+
 func TestSync(t *testing.T) {
 	b := New[int](0)
-	if e := b.Add(1); e != nil {
+	if e := b.Add(ctx, 1); e != nil {
 		t.Error(e)
 	}
-	if e := b.Add(2, 3); e != nil {
+	if e := b.Add(ctx, 2, 3); e != nil {
 		t.Error(e)
 	}
 
-	msgs := b.Wait()
+	msgs, err := b.Wait(ctx)
+	if err != nil {
+		t.Error(err)
+	}
 	if len(msgs) != 3 {
 		t.Errorf("unexpected message count in batch: %v", len(msgs))
 	}
 
-	if e := b.Add(4); e != nil {
+	if e := b.Add(ctx, 4); e != nil {
 		t.Error(e)
 	}
 
-	msgs = b.Wait()
+	msgs, err = b.Wait(ctx)
+	if err != nil {
+		t.Error(err)
+	}
 	if len(msgs) != 1 {
 		t.Errorf("unexpected message count in batch: %v", len(msgs))
 	}
@@ -35,13 +43,16 @@ func TestSync(t *testing.T) {
 		t.Errorf("Unexpected error value: %v", e)
 	}
 
-	if e := b.Add(4); e != ErrClosed {
+	if e := b.Add(ctx, 4); e != ErrClosed {
 		t.Errorf("Unexpected error value: %v", e)
 	}
 
-	msgs = b.Wait()
+	msgs, err = b.Wait(ctx)
 	if len(msgs) != 0 {
 		t.Errorf("unexpected message count in batch: %v", len(msgs))
+	}
+	if err != ErrClosed {
+		t.Errorf("Unexpected error value: %v", err)
 	}
 	// close twice
 	if e := b.Close(); e != ErrClosed {
@@ -51,18 +62,21 @@ func TestSync(t *testing.T) {
 
 func TestLimits(t *testing.T) {
 	b := New[int](5)
-	if e := b.Add(1, 2); e != nil {
+	if e := b.Add(ctx, 1, 2); e != nil {
 		t.Errorf("Unexpected error value: %v", e)
 	}
-	if e := b.Add(3, 4, 5, 6, 7, 8); e != ErrTooManyMessages {
+	if e := b.Add(ctx, 3, 4, 5, 6, 7, 8); e != ErrTooManyMessages {
 		t.Errorf("Unexpected error value: %v", e)
 	}
-	if e := b.Add(3, 4); e != nil {
+	if e := b.Add(ctx, 3, 4); e != nil {
 		t.Errorf("Unexpected error value: %v", e)
 	}
 
 	for i := 1; i <= 4; i++ {
-		msgs := b.WaitMax(1)
+		msgs, err := b.WaitMax(ctx, 1)
+		if err != nil {
+			t.Error(err)
+		}
 		if len(msgs) != 1 {
 			t.Errorf("Unexpected batch len: %v", len(msgs))
 		}
@@ -82,9 +96,12 @@ func TestMinMax(t *testing.T) {
 	var resCh = make(chan []int)
 	var quit = make(chan bool)
 	go func() {
-		var result []int
+		var (
+			result []int
+			err    error
+		)
 		for {
-			if result = b.WaitMinMax(2, 3); len(result) == 0 {
+			if result, err = b.WaitMinMax(ctx, 2, 3); len(result) == 0 && err == ErrClosed {
 				quit <- true
 				return
 			}
@@ -92,18 +109,18 @@ func TestMinMax(t *testing.T) {
 		}
 	}()
 
-	b.Add(1)
-	b.Add(2)
+	b.Add(ctx, 1)
+	b.Add(ctx, 2)
 	result := <-resCh
 	if len(result) != 2 {
 		t.Errorf("Unexpected result: %v", result)
 	}
-	b.Add(3, 4, 5, 6)
+	b.Add(ctx, 3, 4, 5, 6)
 	result = <-resCh
 	if len(result) != 3 {
 		t.Errorf("Unexpected result: %v", result)
 	}
-	b.Add(7)
+	b.Add(ctx, 7)
 	result = <-resCh
 	if len(result) != 2 {
 		t.Errorf("Unexpected result: %v", result)
@@ -117,18 +134,18 @@ func TestGetAll(t *testing.T) {
 	var quit = make(chan bool)
 	go func() {
 		for {
-			if r := b.WaitMinMax(3, 3); len(r) == 0 {
+			if r, _ := b.WaitMinMax(ctx, 3, 3); len(r) == 0 {
 				quit <- true
 				return
 			}
 		}
 	}()
 
-	b.Add(2, 2)
+	b.Add(ctx, 2, 2)
 	if res := b.GetAll(); len(res) != 2 {
 		t.Errorf("Unexpected result: %v", res)
 	}
-	b.Add(2, 2)
+	b.Add(ctx, 2, 2)
 	b.Close()
 	if res := b.GetAll(); len(res) != 2 {
 		t.Errorf("Unexpected result: %v", res)
@@ -148,11 +165,11 @@ func TestTryAdd(t *testing.T) {
 
 func TestPause(t *testing.T) {
 	b := New[int](10)
-	b.Add(1, 2, 3)
+	b.Add(ctx, 1, 2, 3)
 	var result = make(chan int)
 	go func() {
 		for {
-			msgs := b.Wait()
+			msgs, _ := b.Wait(ctx)
 			result <- len(msgs)
 			if len(msgs) == 0 {
 				return
@@ -169,7 +186,7 @@ func TestPause(t *testing.T) {
 		t.Error("Can't receive msgs")
 	}
 
-	b.Add(1, 2)
+	b.Add(ctx, 1, 2)
 	select {
 	case l := <-result:
 		if l != 2 {
@@ -179,7 +196,7 @@ func TestPause(t *testing.T) {
 		t.Error("Can't receive msgs")
 	}
 	b.Pause()
-	b.Add(1, 2, 3, 4)
+	b.Add(ctx, 1, 2, 3, 4)
 	select {
 	case <-result:
 		t.Error("Pause do not work :-)")
@@ -197,7 +214,7 @@ func TestPause(t *testing.T) {
 	}
 
 	b.Pause()
-	b.Add(1)
+	b.Add(ctx, 1)
 	select {
 	case <-result:
 		t.Error("Pause do not work :-)")
@@ -231,12 +248,12 @@ func TestPriority(t *testing.T) {
 		go func(p float64) {
 			var count int
 			for {
-				if l := len(mb.PriorityWaitMinMax(p, 1, 1)); l != 0 {
-					count += l
-					//fmt.Println("receive", l, p)
-					time.Sleep(time.Millisecond * 10)
-
+				msgs, err := mb.PriorityWaitMinMax(ctx, p, 1, 1)
+				if err != nil {
+					break
 				} else {
+					count += len(msgs)
+					time.Sleep(time.Millisecond * 10)
 					break
 				}
 			}
@@ -246,7 +263,7 @@ func TestPriority(t *testing.T) {
 	time.Sleep(time.Millisecond * 10)
 
 	for i := 0; i < 100; i++ {
-		mb.Add(i)
+		mb.Add(ctx, i)
 		time.Sleep(time.Millisecond * 5)
 	}
 	mb.Close()
@@ -256,6 +273,66 @@ func TestPriority(t *testing.T) {
 		resMap[res.priority] = res.count
 	}
 	t.Log(resMap)
+}
+
+func TestTimeLimit(t *testing.T) {
+	mb := New[int](0)
+	defer mb.Close()
+	mb.Add(ctx, 1, 3, 4, 5, 6)
+
+	ctx = CtxWithTimeLimit(ctx, time.Millisecond*100)
+	res, err := mb.WaitMinMax(ctx, 3, 3)
+	if err != nil {
+		t.Error(err)
+	}
+	if len(res) != 3 {
+		t.Error("should be 3")
+	}
+	res, err = mb.WaitMinMax(ctx, 3, 3)
+	if err != nil {
+		t.Error(err)
+	}
+	if len(res) != 2 {
+		t.Error("should be 2")
+	}
+	var done = make(chan []int)
+	go func() {
+		res, _ = mb.WaitMinMax(ctx, 3, 3)
+		done <- res
+	}()
+	time.Sleep(time.Millisecond * 200)
+	mb.Add(ctx, 6)
+	res = <-done
+	if len(res) != 1 {
+		t.Error("should be 1")
+	}
+}
+
+func TestCtxWait(t *testing.T) {
+	mb := New[int](0)
+	ctx, cancel := context.WithTimeout(ctx, time.Millisecond)
+	defer cancel()
+	// wait deadline
+	_, err := mb.Wait(ctx)
+	if err != context.DeadlineExceeded {
+		t.Errorf("should be deadline error, but got: %v", err)
+	}
+	// already deadlined context
+	_, err = mb.Wait(ctx)
+	if err != context.DeadlineExceeded {
+		t.Errorf("should be deadline error, but got: %v", err)
+	}
+}
+
+func TestCtxAdd(t *testing.T) {
+	mb := New[int](5)
+	mb.Add(ctx, 1, 2, 3)
+	ctx, cancel := context.WithTimeout(ctx, time.Millisecond*10)
+	defer cancel()
+	err := mb.Add(ctx, 4, 5, 6)
+	if err != context.DeadlineExceeded {
+		t.Errorf("should be deadline error, but got: %v", err)
+	}
 }
 
 func TestAsync(t *testing.T) {
@@ -274,7 +351,7 @@ func test(t *testing.T, b *MB[int], sc, rc int, dur time.Duration) {
 	for i := 0; i < sc; i++ {
 		go func(w int) {
 			for {
-				if e := b.Add(w); e != nil {
+				if e := b.Add(ctx, w); e != nil {
 					exit <- true
 					return
 				}
@@ -286,9 +363,19 @@ func test(t *testing.T, b *MB[int], sc, rc int, dur time.Duration) {
 	// start read workers
 	for i := 0; i < rc; i++ {
 		go func(w int) {
+			var (
+				msgs []int
+				err  error
+			)
 			for {
-				msgs := b.Wait()
-				if len(msgs) == 0 {
+				if rand.Intn(10) < 3 {
+					ctx, cancel := context.WithTimeout(ctx, time.Millisecond)
+					msgs, err = b.Wait(ctx)
+					cancel()
+				} else {
+					msgs, err = b.Wait(ctx)
+				}
+				if err == ErrClosed {
 					exit <- true
 					return
 				}
@@ -321,7 +408,7 @@ func BenchmarkAdd(b *testing.B) {
 	mb := New[bool](0)
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		mb.Add(true)
+		mb.Add(ctx, true)
 	}
 }
 
@@ -344,7 +431,7 @@ func benchmarkWait(b *testing.B, max int) {
 	mb := New[bool](1000)
 	go func() {
 		for {
-			if e := mb.Add(true); e != nil {
+			if e := mb.Add(ctx, true); e != nil {
 				return
 			}
 		}
@@ -352,7 +439,7 @@ func benchmarkWait(b *testing.B, max int) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		mb.WaitMax(max)
+		mb.WaitMax(ctx, max)
 	}
 	b.StopTimer()
 	mb.Close()
@@ -367,7 +454,7 @@ func BenchmarkWaitPriority(b *testing.B) {
 	for i := 0; i < 100; i++ {
 		go func(p float64) {
 			for {
-				if msgs := mb.PriorityWaitMinMax(p, 1, 1); len(msgs) == 0 {
+				if msgs, _ := mb.PriorityWaitMinMax(ctx, p, 1, 1); len(msgs) == 0 {
 					return
 				} else {
 					receivedCh <- struct{}{}
@@ -379,7 +466,7 @@ func BenchmarkWaitPriority(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		mb.Add(true)
+		mb.Add(ctx, true)
 		<-receivedCh
 	}
 }

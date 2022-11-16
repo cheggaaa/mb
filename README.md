@@ -40,7 +40,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/cheggaaa/mb/v2"
+	"github.com/cheggaaa/mb/v3"
 )
 
 func main() {
@@ -92,10 +92,8 @@ func worker(name string, q *mb.MB[string], done chan bool) {
 	fmt.Printf("Worker %s: started\n", name)
 	for {
 		// getting messages
-		msgs := q.Wait()
-
-		if len(msgs) == 0 {
-			// 0 messages mean that queue is closed
+		msgs, err := q.Wait()
+		if err != nil {
 			break
 		}
 

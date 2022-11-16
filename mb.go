@@ -2,8 +2,10 @@
 package mb
 
 import (
+	"context"
 	"errors"
 	"sync"
+	"time"
 )
 
 // ErrClosed is returned when you add message to closed queue
@@ -23,7 +25,6 @@ func New[T any](size int) *MB[T] {
 	mb := &MB[T]{
 		size: size,
 	}
-	mb.addCond = sync.NewCond(&mb.mu)
 	return mb
 }
 
@@ -42,14 +43,12 @@ type waiter[T any] struct {
 }
 
 // MB - message batching object
-// Implements queue.
-// Based on condition variables
 type MB[T any] struct {
-	heap []T
+	buf  []T
 	mu   sync.Mutex
 	size int
 
-	addCond *sync.Cond
+	addUnlock chan struct{}
 
 	waiters []*waiter[T]
 
@@ -62,66 +61,74 @@ type MB[T any] struct {
 // Wait until anybody add message
 // Returning array of accumulated messages
 // When queue will be closed length of array will be 0
-func (mb *MB[T]) Wait() (msgs []T) {
-	return mb.WaitMinMax(0, 0)
+func (mb *MB[T]) Wait(ctx context.Context) (msgs []T, err error) {
+	return mb.WaitMinMax(ctx, 0, 0)
 }
 
 // WaitMax it's Wait with limit of maximum returning array size
-func (mb *MB[T]) WaitMax(max int) (msgs []T) {
-	return mb.WaitMinMax(0, max)
+func (mb *MB[T]) WaitMax(ctx context.Context, max int) (msgs []T, err error) {
+	return mb.WaitMinMax(ctx, 0, max)
 }
 
 // WaitMin it's Wait with limit of minimum returning array size
-func (mb *MB[T]) WaitMin(min int) (msgs []T) {
-	return mb.WaitMinMax(min, 0)
+func (mb *MB[T]) WaitMin(ctx context.Context, min int) (msgs []T, err error) {
+	return mb.WaitMinMax(ctx, min, 0)
 }
 
 // WaitMinMax it's Wait with limit of minimum and maximum returning array size
 // value <= 0 means no limit
-func (mb *MB[T]) WaitMinMax(min, max int) (msgs []T) {
-	return mb.PriorityWaitMinMax(defaultPriority, min, max)
+func (mb *MB[T]) WaitMinMax(ctx context.Context, min, max int) (msgs []T, err error) {
+	return mb.PriorityWaitMinMax(ctx, defaultPriority, min, max)
 }
 
 // PriorityWait waits new messages
 // data will be released to waiter with higher priority
-func (mb *MB[T]) PriorityWait(priority float64) (msgs []T) {
-	return mb.PriorityWaitMinMax(priority, 1, 0)
+func (mb *MB[T]) PriorityWait(ctx context.Context, priority float64) (msgs []T, err error) {
+	return mb.PriorityWaitMinMax(ctx, priority, 1, 0)
 }
 
 // PriorityWaitMin waits new message with given min limit
 // data will be released to waiter with higher priority
-func (mb *MB[T]) PriorityWaitMin(priority float64, min int) (msgs []T) {
-	return mb.PriorityWaitMinMax(priority, min, 0)
+func (mb *MB[T]) PriorityWaitMin(ctx context.Context, priority float64, min int) (msgs []T, err error) {
+	return mb.PriorityWaitMinMax(ctx, priority, min, 0)
 }
 
 // PriorityWaitMax waits new message with given max limit
 // data will be released to waiter with higher priority
-func (mb *MB[T]) PriorityWaitMax(priority float64, max int) (msgs []T) {
-	return mb.PriorityWaitMinMax(priority, 1, max)
+func (mb *MB[T]) PriorityWaitMax(ctx context.Context, priority float64, max int) (msgs []T, err error) {
+	return mb.PriorityWaitMinMax(ctx, priority, 1, max)
 }
 
 // PriorityWaitMinMax waits new messages with given params
 // data will be released to waiter with higher priority
-func (mb *MB[T]) PriorityWaitMinMax(priority float64, min, max int) (msgs []T) {
+func (mb *MB[T]) PriorityWaitMinMax(ctx context.Context, priority float64, min, max int) (msgs []T, err error) {
 	mb.mu.Lock()
-	defer mb.addCond.Broadcast()
 	if min < 1 {
 		min = 1
 	}
+checkBuf:
 	if !mb.paused {
+		select {
+		case <-ctx.Done():
+			mb.mu.Unlock()
+			return nil, ctx.Err()
+		default:
+		}
 		// check the work without waiter
-		heapLen := len(mb.heap)
-		if min <= heapLen {
-			if max <= 0 || max >= heapLen {
-				msgs = mb.heap
-				mb.heap = nil
+		bufLen := len(mb.buf)
+		if min <= bufLen {
+			if max <= 0 || max >= bufLen {
+				msgs = mb.buf
+				mb.buf = nil
 				mb.getMsgsCount += int64(len(msgs))
+				mb.unlockAdd()
 				mb.mu.Unlock()
 				return
 			} else {
-				msgs = mb.heap[:max]
-				mb.heap = mb.heap[max:]
+				msgs = mb.buf[:max]
+				mb.buf = mb.buf[max:]
 				mb.getMsgsCount += int64(len(msgs))
+				mb.unlockAdd()
 				mb.mu.Unlock()
 				return
 			}
@@ -129,15 +136,43 @@ func (mb *MB[T]) PriorityWaitMinMax(priority float64, min, max int) (msgs []T) {
 	}
 	if mb.closed {
 		mb.mu.Unlock()
-		return
+		return nil, ErrClosed
 	}
 	w := mb.allocWaiter()
 	w.priority = priority
 	w.min = min
 	w.max = max
 	mb.mu.Unlock()
-	msgs, _ = <-w.data
-	return
+
+wait:
+	var timeLimit <-chan time.Time
+	if dur := getMBTimeLimit(ctx); dur > 0 {
+		timeLimit = time.After(dur)
+	}
+	var ok bool
+	select {
+	case msgs, ok = <-w.data:
+		if !ok {
+			return nil, ErrClosed
+		}
+		return msgs, nil
+	case <-timeLimit:
+		mb.mu.Lock()
+		if len(mb.buf) > 0 {
+			min = 1
+			mb.releaseWaiter(w)
+			goto checkBuf
+		} else {
+			w.min = 1
+			mb.mu.Unlock()
+			goto wait
+		}
+	case <-ctx.Done():
+		mb.mu.Lock()
+		mb.releaseWaiter(w)
+		mb.mu.Unlock()
+		return nil, ctx.Err()
+	}
 }
 
 func (mb *MB[T]) allocWaiter() *waiter[T] {
@@ -153,12 +188,20 @@ func (mb *MB[T]) allocWaiter() *waiter[T] {
 	return w
 }
 
+func (mb *MB[T]) releaseWaiter(w *waiter[T]) {
+	if len(w.data) == 1 {
+		// messages have been sent to the waiter, so let's return these to buf
+		mb.buf = append(<-w.data, mb.buf...)
+	}
+	w.inUse = false
+}
+
 // GetAll return all messages and flush queue
 // Works on closed queue
 func (mb *MB[T]) GetAll() (msgs []T) {
 	mb.mu.Lock()
-	msgs = mb.heap
-	mb.heap = nil
+	msgs = mb.buf
+	mb.buf = nil
 	mb.getCount++
 	mb.getMsgsCount += int64(len(msgs))
 	mb.mu.Unlock()
@@ -169,21 +212,38 @@ func (mb *MB[T]) GetAll() (msgs []T) {
 // When queue is closed - returning ErrClosed
 // When count messages bigger then queue size - returning ErrTooManyMessages
 // When the queue is full - wait until will free place
-func (mb *MB[T]) Add(msgs ...T) (err error) {
-	mb.mu.Lock()
-	defer mb.mu.Unlock()
+func (mb *MB[T]) Add(ctx context.Context, msgs ...T) (err error) {
 	for {
+		mb.mu.Lock()
 		if err = mb.add(msgs...); err != nil {
 			if err == ErrOverflowed {
 				err = nil
-				mb.addCond.Wait()
+				if mb.addUnlock == nil {
+					mb.addUnlock = make(chan struct{})
+				}
+				addUnlock := mb.addUnlock
+				mb.mu.Unlock()
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-addUnlock:
+				}
 				continue
 			} else {
+				mb.mu.Unlock()
 				return
 			}
 		} else {
+			mb.mu.Unlock()
 			return
 		}
+	}
+}
+
+func (mb *MB[T]) unlockAdd() {
+	if mb.addUnlock != nil {
+		close(mb.addUnlock)
+		mb.addUnlock = nil
 	}
 }
 
@@ -204,11 +264,11 @@ func (mb *MB[T]) add(msgs ...T) (err error) {
 	if mb.size > 0 && len(msgs) > mb.size {
 		return ErrTooManyMessages
 	}
-	if mb.size > 0 && len(msgs)+len(mb.heap) > mb.size {
+	if mb.size > 0 && len(msgs)+len(mb.buf) > mb.size {
 		return ErrOverflowed
 	}
-	// add to heap
-	mb.heap = append(mb.heap, msgs...)
+	// add to buf
+	mb.buf = append(mb.buf, msgs...)
 	if !mb.paused {
 		mb.trySendHeap()
 	}
@@ -217,10 +277,11 @@ func (mb *MB[T]) add(msgs ...T) (err error) {
 
 func (mb *MB[T]) trySendHeap() {
 	var bestWaiter *waiter[T]
+	var sent bool
 	for {
-		heapLen := len(mb.heap)
+		heapLen := len(mb.buf)
 		if heapLen == 0 {
-			return
+			break
 		}
 		for _, w := range mb.waiters {
 			if w.inUse && (bestWaiter == nil || w.priority > bestWaiter.priority) {
@@ -231,22 +292,26 @@ func (mb *MB[T]) trySendHeap() {
 		}
 		if bestWaiter != nil {
 			if bestWaiter.max <= 0 || bestWaiter.max >= heapLen {
-				toSend := mb.heap
+				toSend := mb.buf
 				bestWaiter.data <- toSend
 				mb.getMsgsCount += int64(len(toSend))
-				mb.heap = nil
+				mb.buf = nil
 				bestWaiter.inUse = false
 			} else {
-				toSend := mb.heap[:bestWaiter.max]
+				toSend := mb.buf[:bestWaiter.max]
 				bestWaiter.data <- toSend
 				mb.getMsgsCount += int64(len(toSend))
-				mb.heap = mb.heap[bestWaiter.max:]
+				mb.buf = mb.buf[bestWaiter.max:]
 				bestWaiter.inUse = false
 			}
+			sent = true
 			bestWaiter = nil
 		} else {
-			return
+			break
 		}
+	}
+	if sent {
+		mb.unlockAdd()
 	}
 }
 
@@ -268,7 +333,7 @@ func (mb *MB[T]) Resume() {
 // Len returning current size of queue
 func (mb *MB[T]) Len() (l int) {
 	mb.mu.Lock()
-	l = len(mb.heap)
+	l = len(mb.buf)
 	mb.mu.Unlock()
 	return
 }
