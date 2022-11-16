@@ -335,6 +335,44 @@ func TestCtxAdd(t *testing.T) {
 	}
 }
 
+func TestWaitOne(t *testing.T) {
+	mb := New[int](5)
+	mb.Add(ctx, 1)
+	res, err := mb.WaitOne(ctx)
+	if err != nil {
+		t.Error(err)
+	}
+	if res != 1 {
+		t.Errorf("expected 1, but got %d", res)
+	}
+	if err = mb.Close(); err != nil {
+		t.Error(err)
+	}
+	_, err = mb.WaitOne(ctx)
+	if err != ErrClosed {
+		t.Errorf("expected ErrClosed, but got %v", err)
+	}
+}
+
+func TestPriorityWaitOne(t *testing.T) {
+	mb := New[int](5)
+	mb.Add(ctx, 1)
+	res, err := mb.PriorityWaitOne(ctx, 42)
+	if err != nil {
+		t.Error(err)
+	}
+	if res != 1 {
+		t.Errorf("expected 1, but got %d", res)
+	}
+	if err = mb.Close(); err != nil {
+		t.Error(err)
+	}
+	_, err = mb.PriorityWaitOne(ctx, 3)
+	if err != ErrClosed {
+		t.Errorf("expected ErrClosed, but got %v", err)
+	}
+}
+
 func TestAsync(t *testing.T) {
 	test(t, New[int](0), 4, 4, time.Millisecond*5)
 	test(t, New[int](10), 4, 4, time.Millisecond*5)

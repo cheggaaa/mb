@@ -65,6 +65,15 @@ func (mb *MB[T]) Wait(ctx context.Context) (msgs []T, err error) {
 	return mb.WaitMinMax(ctx, 0, 0)
 }
 
+// WaitOne it's an alias for WaitMax(1)
+func (mb *MB[T]) WaitOne(ctx context.Context) (msg T, err error) {
+	msgs, err := mb.WaitMax(ctx, 1)
+	if err != nil {
+		return
+	}
+	return msgs[0], nil
+}
+
 // WaitMax it's Wait with limit of maximum returning array size
 func (mb *MB[T]) WaitMax(ctx context.Context, max int) (msgs []T, err error) {
 	return mb.WaitMinMax(ctx, 0, max)
@@ -85,6 +94,15 @@ func (mb *MB[T]) WaitMinMax(ctx context.Context, min, max int) (msgs []T, err er
 // data will be released to waiter with higher priority
 func (mb *MB[T]) PriorityWait(ctx context.Context, priority float64) (msgs []T, err error) {
 	return mb.PriorityWaitMinMax(ctx, priority, 1, 0)
+}
+
+// PriorityWaitOne it's an alias for PriorityWaitMax(1)
+func (mb *MB[T]) PriorityWaitOne(ctx context.Context, priority float64) (msg T, err error) {
+	msgs, err := mb.PriorityWaitMax(ctx, priority, 1)
+	if err != nil {
+		return
+	}
+	return msgs[0], nil
 }
 
 // PriorityWaitMin waits new message with given min limit
