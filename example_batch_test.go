@@ -75,9 +75,10 @@ func Example_withTimeLimit() {
 	go func() {
 		defer close(done)
 		ctxWithTimeLimit := mb.CtxWithTimeLimit(ctx, time.Millisecond*200)
+		cond := batcher.NewCond().WithMin(10).WithMax(15)
 		for {
 			// get at least 10 items or after 200 ms get at least 1 item
-			items, err := batcher.WaitMinMax(ctxWithTimeLimit, 10, 15)
+			items, err := cond.Wait(ctxWithTimeLimit)
 			if err != nil {
 				fmt.Printf("waiter received error: %v; stop goroutine\n", err)
 				return

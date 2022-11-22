@@ -2,6 +2,7 @@ package mb
 
 import (
 	"context"
+	"fmt"
 	"math/rand"
 	"sync/atomic"
 	"testing"
@@ -73,7 +74,7 @@ func TestLimits(t *testing.T) {
 	}
 
 	for i := 1; i <= 4; i++ {
-		msgs, err := b.WaitMax(ctx, 1)
+		msgs, err := b.NewCond().WithMax(1).Wait(ctx)
 		if err != nil {
 			t.Error(err)
 		}
@@ -101,7 +102,7 @@ func TestMinMax(t *testing.T) {
 			err    error
 		)
 		for {
-			if result, err = b.WaitMinMax(ctx, 2, 3); len(result) == 0 && err == ErrClosed {
+			if result, err = b.NewCond().WithMin(2).WithMax(3).Wait(ctx); len(result) == 0 && err == ErrClosed {
 				quit <- true
 				return
 			}
@@ -134,7 +135,7 @@ func TestGetAll(t *testing.T) {
 	var quit = make(chan bool)
 	go func() {
 		for {
-			if r, _ := b.WaitMinMax(ctx, 3, 3); len(r) == 0 {
+			if r, _ := b.NewCond().WithMin(3).WithMax(3).Wait(ctx); len(r) == 0 {
 				quit <- true
 				return
 			}
@@ -248,7 +249,7 @@ func TestPriority(t *testing.T) {
 		go func(p float64) {
 			var count int
 			for {
-				msgs, err := mb.PriorityWaitMinMax(ctx, p, 1, 1)
+				msgs, err := mb.NewCond().WithPriority(p).WithMin(1).WithMax(1).Wait(ctx)
 				if err != nil {
 					break
 				} else {
@@ -281,14 +282,15 @@ func TestTimeLimit(t *testing.T) {
 	mb.Add(ctx, 1, 3, 4, 5, 6)
 
 	ctx = CtxWithTimeLimit(ctx, time.Millisecond*100)
-	res, err := mb.WaitMinMax(ctx, 3, 3)
+	cond := mb.NewCond().WithMin(3).WithMax(3)
+	res, err := cond.Wait(ctx)
 	if err != nil {
 		t.Error(err)
 	}
 	if len(res) != 3 {
 		t.Error("should be 3")
 	}
-	res, err = mb.WaitMinMax(ctx, 3, 3)
+	res, err = cond.Wait(ctx)
 	if err != nil {
 		t.Error(err)
 	}
@@ -297,7 +299,7 @@ func TestTimeLimit(t *testing.T) {
 	}
 	var done = make(chan []int)
 	go func() {
-		res, _ = mb.WaitMinMax(ctx, 3, 3)
+		res, _ = cond.Wait(ctx)
 		done <- res
 	}()
 	time.Sleep(time.Millisecond * 200)
@@ -354,23 +356,34 @@ func TestWaitOne(t *testing.T) {
 	}
 }
 
-func TestPriorityWaitOne(t *testing.T) {
-	mb := New[int](5)
-	mb.Add(ctx, 1)
-	res, err := mb.PriorityWaitOne(ctx, 42)
+func TestFilter(t *testing.T) {
+	mb := New[int](0)
+	mb.Add(ctx, 1, 2, 3, 4, 5, 6, 7, 8, 9)
+	defer mb.Close()
+
+	cond1 := mb.NewCond().WithFilter(func(v int) bool {
+		return v < 5
+	})
+	cond2 := mb.NewCond().WithFilter(func(v int) bool {
+		return v >= 5
+	})
+
+	res, err := cond2.Wait(ctx)
 	if err != nil {
 		t.Error(err)
 	}
-	if res != 1 {
-		t.Errorf("expected 1, but got %d", res)
+	if fmt.Sprint(res) != "[5 6 7 8 9]" {
+		t.Errorf("unexpected condition result: %v", res)
 	}
-	if err = mb.Close(); err != nil {
+
+	res, err = cond1.Wait(ctx)
+	if err != nil {
 		t.Error(err)
 	}
-	_, err = mb.PriorityWaitOne(ctx, 3)
-	if err != ErrClosed {
-		t.Errorf("expected ErrClosed, but got %v", err)
+	if fmt.Sprint(res) != "[1 2 3 4]" {
+		t.Errorf("unexpected condition result: %v", res)
 	}
+
 }
 
 func TestAsync(t *testing.T) {
@@ -476,8 +489,9 @@ func benchmarkWait(b *testing.B, max int) {
 	}()
 	b.ReportAllocs()
 	b.ResetTimer()
+	cond := mb.NewCond().WithMax(max)
 	for i := 0; i < b.N; i++ {
-		mb.WaitMax(ctx, max)
+		cond.Wait(ctx)
 	}
 	b.StopTimer()
 	mb.Close()
@@ -491,8 +505,9 @@ func BenchmarkWaitPriority(b *testing.B) {
 
 	for i := 0; i < 100; i++ {
 		go func(p float64) {
+			cond := mb.NewCond().WithPriority(p).WithMin(1).WithMax(1)
 			for {
-				if msgs, _ := mb.PriorityWaitMinMax(ctx, p, 1, 1); len(msgs) == 0 {
+				if msgs, _ := cond.Wait(ctx); len(msgs) == 0 {
 					return
 				} else {
 					receivedCh <- struct{}{}

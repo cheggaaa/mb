@@ -17,8 +17,6 @@ var ErrTooManyMessages = errors.New("mb: too many messages")
 // ErrOverflowed means new messages can't be added until there is free space in the queue
 var ErrOverflowed = errors.New("mb: overflowed")
 
-var defaultPriority float64 = 1
-
 // New returns a new MB with given queue size.
 // size <= 0 means unlimited
 func New[T any](size int) *MB[T] {
@@ -35,11 +33,9 @@ func newWaiter[T any]() *waiter[T] {
 }
 
 type waiter[T any] struct {
-	data     chan []T
-	priority float64
-	min      int
-	max      int
-	inUse    bool
+	data  chan []T
+	inUse bool
+	cond  WaitCond[T]
 }
 
 // MB - message batching object
@@ -58,72 +54,114 @@ type MB[T any] struct {
 	addMsgsCount, getMsgsCount int64
 }
 
+// WaitCond describes condition for messages
+type WaitCond[T any] struct {
+	Priority float64
+	Min      int
+	Max      int
+	Filter   func(v T) bool
+	mb       *MB[T]
+}
+
+// WithMax adds max to conditions
+func (wc WaitCond[T]) WithMax(max int) WaitCond[T] {
+	c := wc
+	c.Max = max
+	return c
+}
+
+// WithMin adds min to conditions
+func (wc WaitCond[T]) WithMin(min int) WaitCond[T] {
+	c := wc
+	c.Min = min
+	return c
+}
+
+// WithPriority adds priority to conditions
+func (wc WaitCond[T]) WithPriority(priority float64) WaitCond[T] {
+	c := wc
+	c.Priority = priority
+	return c
+}
+
+// WithFilter adds filter to conditions
+// filter function should return true for acceptable message and false for unacceptable
+func (wc WaitCond[T]) WithFilter(f func(v T) bool) WaitCond[T] {
+	c := wc
+	c.Filter = f
+	return c
+}
+
+// Wait waits messages with defined condition
+func (wc WaitCond[T]) Wait(ctx context.Context) (msgs []T, err error) {
+	return wc.mb.WaitCond(ctx, wc)
+}
+
+// WaitOne waits one message with defined condition
+func (wc WaitCond[T]) WaitOne(ctx context.Context) (msg T, err error) {
+	msgs, err := wc.mb.WaitCond(ctx, wc.WithMax(1))
+	if err != nil {
+		return
+	}
+	return msgs[0], nil
+}
+
+func (wc WaitCond[T]) getMessages(buf []T) (toReturn, keep []T) {
+	keep = buf
+	if wc.Min < 1 {
+		wc.Min = 1
+	}
+	bufLen := len(buf)
+	if wc.Min > bufLen {
+		return
+	}
+
+	if wc.Filter == nil {
+		if wc.Max <= 0 || wc.Max >= bufLen {
+			toReturn = buf
+			keep = nil
+		} else {
+			toReturn = buf[:wc.Max]
+			keep = buf[wc.Max:]
+		}
+	} else {
+		toReturn = make([]T, 0, bufLen)
+		keep = keep[:0]
+		for _, v := range buf {
+			if (wc.Max <= 0 || len(toReturn) < wc.Max) && wc.Filter(v) {
+				toReturn = append(toReturn, v)
+			} else {
+				keep = append(keep, v)
+			}
+		}
+		if len(toReturn) > 0 && len(toReturn) < wc.Min {
+			toReturn = nil
+			keep = buf
+		}
+	}
+	return
+}
+
+// NewCond creates new condition object
+func (mb *MB[T]) NewCond() WaitCond[T] {
+	return WaitCond[T]{mb: mb}
+}
+
 // Wait until anybody add message
 // Returning array of accumulated messages
-// When queue will be closed length of array will be 0
 func (mb *MB[T]) Wait(ctx context.Context) (msgs []T, err error) {
-	return mb.WaitMinMax(ctx, 0, 0)
+	return mb.WaitCond(ctx, WaitCond[T]{})
 }
 
-// WaitOne it's an alias for WaitMax(1)
+// WaitOne waits one message
 func (mb *MB[T]) WaitOne(ctx context.Context) (msg T, err error) {
-	msgs, err := mb.WaitMax(ctx, 1)
-	if err != nil {
-		return
-	}
-	return msgs[0], nil
+	return mb.NewCond().WaitOne(ctx)
 }
 
-// WaitMax it's Wait with limit of maximum returning array size
-func (mb *MB[T]) WaitMax(ctx context.Context, max int) (msgs []T, err error) {
-	return mb.WaitMinMax(ctx, 0, max)
-}
-
-// WaitMin it's Wait with limit of minimum returning array size
-func (mb *MB[T]) WaitMin(ctx context.Context, min int) (msgs []T, err error) {
-	return mb.WaitMinMax(ctx, min, 0)
-}
-
-// WaitMinMax it's Wait with limit of minimum and maximum returning array size
-// value <= 0 means no limit
-func (mb *MB[T]) WaitMinMax(ctx context.Context, min, max int) (msgs []T, err error) {
-	return mb.PriorityWaitMinMax(ctx, defaultPriority, min, max)
-}
-
-// PriorityWait waits new messages
-// data will be released to waiter with higher priority
-func (mb *MB[T]) PriorityWait(ctx context.Context, priority float64) (msgs []T, err error) {
-	return mb.PriorityWaitMinMax(ctx, priority, 1, 0)
-}
-
-// PriorityWaitOne it's an alias for PriorityWaitMax(1)
-func (mb *MB[T]) PriorityWaitOne(ctx context.Context, priority float64) (msg T, err error) {
-	msgs, err := mb.PriorityWaitMax(ctx, priority, 1)
-	if err != nil {
-		return
-	}
-	return msgs[0], nil
-}
-
-// PriorityWaitMin waits new message with given min limit
-// data will be released to waiter with higher priority
-func (mb *MB[T]) PriorityWaitMin(ctx context.Context, priority float64, min int) (msgs []T, err error) {
-	return mb.PriorityWaitMinMax(ctx, priority, min, 0)
-}
-
-// PriorityWaitMax waits new message with given max limit
-// data will be released to waiter with higher priority
-func (mb *MB[T]) PriorityWaitMax(ctx context.Context, priority float64, max int) (msgs []T, err error) {
-	return mb.PriorityWaitMinMax(ctx, priority, 1, max)
-}
-
-// PriorityWaitMinMax waits new messages with given params
-// data will be released to waiter with higher priority
-func (mb *MB[T]) PriorityWaitMinMax(ctx context.Context, priority float64, min, max int) (msgs []T, err error) {
+// WaitCond waits new messages with given conditions
+func (mb *MB[T]) WaitCond(ctx context.Context, cond WaitCond[T]) (msgs []T, err error) {
 	mb.mu.Lock()
-	if min < 1 {
-		min = 1
-	}
+
 checkBuf:
 	if !mb.paused {
 		select {
@@ -133,23 +171,11 @@ checkBuf:
 		default:
 		}
 		// check the work without waiter
-		bufLen := len(mb.buf)
-		if min <= bufLen {
-			if max <= 0 || max >= bufLen {
-				msgs = mb.buf
-				mb.buf = nil
-				mb.getMsgsCount += int64(len(msgs))
-				mb.unlockAdd()
-				mb.mu.Unlock()
-				return
-			} else {
-				msgs = mb.buf[:max]
-				mb.buf = mb.buf[max:]
-				mb.getMsgsCount += int64(len(msgs))
-				mb.unlockAdd()
-				mb.mu.Unlock()
-				return
-			}
+		if msgs, mb.buf = cond.getMessages(mb.buf); len(msgs) > 0 {
+			mb.getMsgsCount += int64(len(msgs))
+			mb.unlockAdd()
+			mb.mu.Unlock()
+			return
 		}
 	}
 	if mb.closed {
@@ -157,9 +183,7 @@ checkBuf:
 		return nil, ErrClosed
 	}
 	w := mb.allocWaiter()
-	w.priority = priority
-	w.min = min
-	w.max = max
+	w.cond = cond
 	mb.mu.Unlock()
 
 wait:
@@ -177,11 +201,11 @@ wait:
 	case <-timeLimit:
 		mb.mu.Lock()
 		if len(mb.buf) > 0 {
-			min = 1
+			cond.Min = 1
 			mb.releaseWaiter(w)
 			goto checkBuf
 		} else {
-			w.min = 1
+			w.cond.Min = 1
 			mb.mu.Unlock()
 			goto wait
 		}
@@ -302,28 +326,21 @@ func (mb *MB[T]) trySendHeap() {
 			break
 		}
 		for _, w := range mb.waiters {
-			if w.inUse && (bestWaiter == nil || w.priority > bestWaiter.priority) {
-				if w.min > 0 && w.min <= heapLen {
+			if w.inUse && (bestWaiter == nil || w.cond.Priority > bestWaiter.cond.Priority) {
+				if w.cond.Min < 1 || w.cond.Min <= heapLen {
 					bestWaiter = w
 				}
 			}
 		}
 		if bestWaiter != nil {
-			if bestWaiter.max <= 0 || bestWaiter.max >= heapLen {
-				toSend := mb.buf
-				bestWaiter.data <- toSend
-				mb.getMsgsCount += int64(len(toSend))
-				mb.buf = nil
+			var msgs []T
+			if msgs, mb.buf = bestWaiter.cond.getMessages(mb.buf); len(msgs) > 0 {
+				mb.getMsgsCount += int64(len(msgs))
+				bestWaiter.data <- msgs
 				bestWaiter.inUse = false
-			} else {
-				toSend := mb.buf[:bestWaiter.max]
-				bestWaiter.data <- toSend
-				mb.getMsgsCount += int64(len(toSend))
-				mb.buf = mb.buf[bestWaiter.max:]
-				bestWaiter.inUse = false
+				sent = true
+				bestWaiter = nil
 			}
-			sent = true
-			bestWaiter = nil
 		} else {
 			break
 		}
