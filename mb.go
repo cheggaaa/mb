@@ -39,6 +39,20 @@ type waiter[T any] struct {
 	cond  WaitCond[T]
 }
 
+type sortedWaiters[T any] []*waiter[T]
+
+func (s sortedWaiters[T]) Len() int {
+	return len(s)
+}
+
+func (s sortedWaiters[T]) Less(i, j int) bool {
+	return s[i].cond.Priority > s[j].cond.Priority
+}
+
+func (s sortedWaiters[T]) Swap(i, j int) {
+	s[i], s[j] = s[j], s[i]
+}
+
 // MB - message batching object
 type MB[T any] struct {
 	buf  []T
@@ -186,9 +200,7 @@ checkBuf:
 	w := mb.allocWaiter()
 	w.cond = cond
 	// having waiters always priority sorted
-	sort.Slice(mb.waiters, func(i, j int) bool {
-		return mb.waiters[i].cond.Priority > mb.waiters[j].cond.Priority
-	})
+	sort.Sort(sortedWaiters[T](mb.waiters))
 	mb.mu.Unlock()
 
 wait:
