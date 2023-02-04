@@ -4,6 +4,7 @@ package mb
 import (
 	"context"
 	"errors"
+	"sort"
 	"sync"
 	"time"
 )
@@ -126,7 +127,7 @@ func (wc WaitCond[T]) getMessages(buf []T) (toReturn, keep []T) {
 		}
 	} else {
 		toReturn = make([]T, 0, bufLen)
-		keep = keep[:0]
+		keep = make([]T, 0, bufLen)
 		for _, v := range buf {
 			if (wc.Max <= 0 || len(toReturn) < wc.Max) && wc.Filter(v) {
 				toReturn = append(toReturn, v)
@@ -184,6 +185,10 @@ checkBuf:
 	}
 	w := mb.allocWaiter()
 	w.cond = cond
+	// having waiters always priority sorted
+	sort.Slice(mb.waiters, func(i, j int) bool {
+		return mb.waiters[i].cond.Priority > mb.waiters[j].cond.Priority
+	})
 	mb.mu.Unlock()
 
 wait:
@@ -318,7 +323,6 @@ func (mb *MB[T]) add(msgs ...T) (err error) {
 }
 
 func (mb *MB[T]) trySendHeap() {
-	var bestWaiter *waiter[T]
 	var sent bool
 	for {
 		heapLen := len(mb.buf)
@@ -326,22 +330,20 @@ func (mb *MB[T]) trySendHeap() {
 			break
 		}
 		for _, w := range mb.waiters {
-			if w.inUse && (bestWaiter == nil || w.cond.Priority > bestWaiter.cond.Priority) {
-				if w.cond.Min < 1 || w.cond.Min <= heapLen {
-					bestWaiter = w
+			// they are already sorted by priority
+			if (w.cond.Min < 1 || w.cond.Min <= heapLen) && w.inUse {
+				var msgs []T
+				if msgs, mb.buf = w.cond.getMessages(mb.buf); len(msgs) > 0 {
+					mb.getMsgsCount += int64(len(msgs))
+					w.data <- msgs
+					w.inUse = false
+					sent = true
+					continue
 				}
 			}
 		}
-		if bestWaiter != nil {
-			var msgs []T
-			if msgs, mb.buf = bestWaiter.cond.getMessages(mb.buf); len(msgs) > 0 {
-				mb.getMsgsCount += int64(len(msgs))
-				bestWaiter.data <- msgs
-				bestWaiter.inUse = false
-				sent = true
-				bestWaiter = nil
-			}
-		} else {
+		// no messages processed
+		if heapLen == len(mb.buf) {
 			break
 		}
 	}

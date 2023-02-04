@@ -88,10 +88,9 @@ func TestLimits(t *testing.T) {
 	if e := b.Close(); e != nil {
 		t.Errorf("Unexpected error value: %v", e)
 	}
-
 }
 
-func TestMinMax(t *testing.T) {
+func TestMinMaxNoFilter(t *testing.T) {
 	b := New[int](0)
 
 	var resCh = make(chan []int)
@@ -109,7 +108,6 @@ func TestMinMax(t *testing.T) {
 			resCh <- result
 		}
 	}()
-
 	b.Add(ctx, 1)
 	b.Add(ctx, 2)
 	result := <-resCh
@@ -128,6 +126,200 @@ func TestMinMax(t *testing.T) {
 	}
 	b.Close()
 	<-quit
+}
+
+func TestMinMaxFilter(t *testing.T) {
+	b := New[int](0)
+
+	var resCh = make(chan []int)
+	var quit = make(chan bool)
+	go func() {
+		var (
+			result []int
+			err    error
+		)
+		for {
+			if result, err = b.NewCond().WithMin(2).WithMax(3).WithFilter(func(v int) bool {
+				return v < 10
+			}).Wait(ctx); len(result) == 0 && err == ErrClosed {
+				quit <- true
+				return
+			}
+			resCh <- result
+		}
+	}()
+	b.Add(ctx, 1)
+	b.Add(ctx, 2)
+	result := <-resCh
+	if len(result) != 2 {
+		t.Errorf("Unexpected result: %v", result)
+	}
+	b.Add(ctx, 3, 4, 5, 6)
+	result = <-resCh
+	if len(result) != 3 {
+		t.Errorf("Unexpected result: %v", result)
+	}
+	b.Add(ctx, 7)
+	result = <-resCh
+	if len(result) != 2 {
+		t.Errorf("Unexpected result: %v", result)
+	}
+	b.Add(ctx, 8, 10)
+	select {
+	case result = <-resCh:
+		t.Errorf("unexpected result, should not return")
+	case <-time.After(time.Millisecond * 50):
+		break
+	}
+	b.Add(ctx, 9)
+	result = <-resCh
+	if len(result) != 2 {
+		t.Errorf("Unexpected result: %v", result)
+	}
+	b.Close()
+	<-quit
+}
+
+func TestWaitInapplicableWaiter(t *testing.T) {
+	var (
+		b    = New[int](0)
+		quit = make(chan error)
+		cond = b.NewCond().WithFilter(func(v int) bool {
+			return v > 5
+		})
+		ctx, cancel = context.WithTimeout(ctx, 100*time.Millisecond)
+	)
+	defer cancel()
+	go func() {
+		_, err := cond.WaitOne(ctx)
+		quit <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+	err := b.Add(ctx, 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	err = <-quit
+	if err != context.DeadlineExceeded {
+		t.Fatalf("incorrect error: %v", err)
+	}
+}
+
+func TestWaitInapplicableWaiterThenApplicable(t *testing.T) {
+	type retVal struct {
+		val int
+		err error
+	}
+	var (
+		b                = New[int](0)
+		quit             = make(chan retVal)
+		inapplicableCond = b.NewCond().WithPriority(10).WithFilter(func(v int) bool {
+			return v > 5
+		})
+		applicableCond = b.NewCond().WithPriority(1).WithFilter(func(v int) bool {
+			return v == 1
+		})
+	)
+
+	go func() {
+		_, err := inapplicableCond.WaitOne(ctx)
+		quit <- retVal{-1, err}
+	}()
+	time.Sleep(50 * time.Millisecond)
+	b.Add(ctx, 1)
+	go func() {
+		msg, err := applicableCond.WaitOne(ctx)
+		quit <- retVal{msg, err}
+	}()
+	ret := <-quit
+	if ret.val == -1 {
+		t.Fatalf("incorrect waiter received, error: %v", ret.err)
+	}
+	if ret.err != nil {
+		t.Fatalf("waiter should not return error: %v", ret.err)
+	}
+}
+
+func TestWaitSimultaneousDifferentWaiters(t *testing.T) {
+	var (
+		midPriorityBatch = make(chan []int)
+		lowPriorityBatch = make(chan []int)
+		b                = New[int](0)
+
+		highPriorityCond = b.NewCond().WithPriority(3).WithFilter(func(v int) bool {
+			return v > 5
+		})
+		midPriorityCond = b.NewCond().WithPriority(2).WithMax(1).WithFilter(func(v int) bool {
+			return v < 5
+		})
+		lowPriorityCond = b.NewCond().WithPriority(1).WithFilter(func(v int) bool {
+			return v < 5
+		})
+	)
+	eq := func(a, b []int) bool {
+		if len(a) != len(b) {
+			return false
+		}
+		for i := 0; i < len(a); i++ {
+			if a[i] != b[i] {
+				return false
+			}
+		}
+		return true
+	}
+
+	go func() {
+		highPriorityCond.WaitOne(ctx)
+	}()
+	go func() {
+		msgs, err := midPriorityCond.Wait(ctx)
+		if err == nil {
+			midPriorityBatch <- msgs
+		}
+	}()
+	go func() {
+		msgs, err := lowPriorityCond.Wait(ctx)
+		if err == nil {
+			lowPriorityBatch <- msgs
+		}
+	}()
+	time.Sleep(50 * time.Millisecond)
+	b.Add(ctx, 1, 2, 3)
+
+	midMsgs := <-midPriorityBatch
+	lowMsgs := <-lowPriorityBatch
+
+	if !eq(midMsgs, []int{1}) || !eq(lowMsgs, []int{2, 3}) {
+		t.Errorf("incorrect order of readers")
+	}
+}
+
+func TestReleaseWithNoWait(t *testing.T) {
+	// this test is rather synthetic, because it is hard to reproduce the case
+	var b = New[int](0)
+	var quit = make(chan error)
+
+	ctx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	defer cancel()
+	go func() {
+		_, err := b.NewCond().WaitOne(ctx)
+		quit <- err
+	}()
+	// waiting for client to start reading
+	time.Sleep(50 * time.Millisecond)
+	// locking mx to prevent waiter continuing
+	b.mu.Lock()
+	<-ctx.Done()
+	b.waiters[0].data <- []int{1}
+	b.mu.Unlock()
+	err := <-quit
+	if err != context.DeadlineExceeded {
+		t.Errorf("unexpected error: %v", err)
+	}
+	buf := b.GetAll()
+	if len(buf) != 1 || buf[0] != 1 {
+		t.Errorf("should get waiters buffer")
+	}
 }
 
 func TestGetAll(t *testing.T) {
