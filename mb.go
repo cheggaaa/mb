@@ -55,9 +55,10 @@ func (s sortedWaiters[T]) Swap(i, j int) {
 
 // MB - message batching object
 type MB[T any] struct {
-	buf  []T
-	mu   sync.Mutex
-	size int
+	buf             []T
+	mu              sync.Mutex
+	size            int
+	bufPrependCount int
 
 	addUnlock chan struct{}
 
@@ -121,28 +122,36 @@ func (wc WaitCond[T]) WaitOne(ctx context.Context) (msg T, err error) {
 	return msgs[0], nil
 }
 
-func (wc WaitCond[T]) getMessages(buf []T) (toReturn, keep []T) {
-	keep = buf
+func (wc WaitCond[T]) getMessages(mb *MB[T]) (toReturn, keep []T) {
+	keep = mb.buf
 	if wc.Min < 1 {
 		wc.Min = 1
 	}
-	bufLen := len(buf)
+	bufLen := len(mb.buf)
 	if wc.Min > bufLen {
 		return
 	}
 
 	if wc.Filter == nil {
 		if wc.Max <= 0 || wc.Max >= bufLen {
-			toReturn = buf
+			toReturn = mb.buf
 			keep = nil
+			mb.bufPrependCount = 0
 		} else {
-			toReturn = buf[:wc.Max]
-			keep = buf[wc.Max:]
+			toReturn = mb.buf[:wc.Max]
+			mb.bufPrependCount += wc.Max
+			if mb.bufPrependCount > 10 {
+				keep = make([]T, len(mb.buf[wc.Max:]))
+				copy(keep, mb.buf[wc.Max:])
+				mb.bufPrependCount = 0
+			} else {
+				keep = mb.buf[wc.Max:]
+			}
 		}
 	} else {
 		toReturn = make([]T, 0, bufLen)
 		keep = make([]T, 0, bufLen)
-		for _, v := range buf {
+		for _, v := range mb.buf {
 			if (wc.Max <= 0 || len(toReturn) < wc.Max) && wc.Filter(v) {
 				toReturn = append(toReturn, v)
 			} else {
@@ -151,7 +160,7 @@ func (wc WaitCond[T]) getMessages(buf []T) (toReturn, keep []T) {
 		}
 		if len(toReturn) > 0 && len(toReturn) < wc.Min {
 			toReturn = nil
-			keep = buf
+			keep = mb.buf
 		}
 	}
 	return
@@ -186,7 +195,7 @@ checkBuf:
 		default:
 		}
 		// check the work without waiter
-		if msgs, mb.buf = cond.getMessages(mb.buf); len(msgs) > 0 {
+		if msgs, mb.buf = cond.getMessages(mb); len(msgs) > 0 {
 			mb.getMsgsCount += int64(len(msgs))
 			mb.unlockAdd()
 			mb.mu.Unlock()
@@ -345,7 +354,7 @@ func (mb *MB[T]) trySendHeap() {
 			// they are already sorted by priority
 			if (w.cond.Min < 1 || w.cond.Min <= heapLen) && w.inUse {
 				var msgs []T
-				if msgs, mb.buf = w.cond.getMessages(mb.buf); len(msgs) > 0 {
+				if msgs, mb.buf = w.cond.getMessages(mb); len(msgs) > 0 {
 					mb.getMsgsCount += int64(len(msgs))
 					w.data <- msgs
 					w.inUse = false
