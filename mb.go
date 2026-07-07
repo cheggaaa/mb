@@ -33,9 +33,24 @@ func newWaiter[T any]() *waiter[T] {
 	}
 }
 
+// waiter states, guarded by MB.mu
+const (
+	// waiterFree - the waiter is in the pool and can be allocated
+	waiterFree uint8 = iota
+	// waiterInUse - allocated by a WaitCond call, no messages sent yet
+	waiterInUse
+	// waiterSent - a batch is sent to the data channel. The waiter must not be
+	// reused until the channel is drained: either the consumer received the batch
+	// (empty channel, checked by allocWaiter) or releaseWaiter returned the batch
+	// to the buf. Otherwise a new consumer could steal a batch matched against
+	// the previous condition, or trySendHeap could block on the full channel
+	// while holding mb.mu.
+	waiterSent
+)
+
 type waiter[T any] struct {
 	data  chan []T
-	inUse bool
+	state uint8
 	cond  WaitCond[T]
 }
 
@@ -59,15 +74,20 @@ type MB[T any] struct {
 	mu              sync.Mutex
 	size            int
 	bufPrependCount int
+	// addCount is kept on the same cache line as buf: both are written on every add,
+	// so the hot Add path dirties a single line
+	addCount int64
 
 	addUnlock chan struct{}
 
 	waiters []*waiter[T]
+	// count of waiters in the inUse and not yet sent state; lets the hot Add path
+	// skip the waiters scan entirely when nobody can receive
+	readyWaiters int
 
 	paused, closed bool
 
-	addCount, getCount         int64
-	addMsgsCount, getMsgsCount int64
+	getCount, getMsgsCount int64
 }
 
 // WaitCond describes condition for messages
@@ -196,6 +216,7 @@ checkBuf:
 		}
 		// check the work without waiter
 		if msgs, mb.buf = cond.getMessages(mb); len(msgs) > 0 {
+			mb.getCount++
 			mb.getMsgsCount += int64(len(msgs))
 			mb.unlockAdd()
 			mb.mu.Unlock()
@@ -223,6 +244,8 @@ wait:
 		if !ok {
 			return nil, ErrClosed
 		}
+		// the waiter is not touched here: after the batch is received,
+		// allocWaiter reclaims it by observing the sent flag and the empty channel
 		return msgs, nil
 	case <-timeLimit:
 		mb.mu.Lock()
@@ -244,24 +267,33 @@ wait:
 }
 
 func (mb *MB[T]) allocWaiter() *waiter[T] {
+	mb.readyWaiters++
 	for _, w := range mb.waiters {
-		if !w.inUse {
-			w.inUse = true
+		// released by the consumer, or the sent batch is received and the consumer
+		// is gone: it never touches the waiter after the channel receive
+		if w.state == waiterFree || (w.state == waiterSent && len(w.data) == 0) {
+			w.state = waiterInUse
 			return w
 		}
 	}
 	w := newWaiter[T]()
-	w.inUse = true
+	w.state = waiterInUse
 	mb.waiters = append(mb.waiters, w)
 	return w
 }
 
 func (mb *MB[T]) releaseWaiter(w *waiter[T]) {
-	if len(w.data) == 1 {
-		// messages have been sent to the waiter, so let's return these to buf
-		mb.buf = append(<-w.data, mb.buf...)
+	if w.state == waiterInUse {
+		mb.readyWaiters--
 	}
-	w.inUse = false
+	if len(w.data) == 1 {
+		// messages have been sent to the waiter but not received, so let's return these to buf
+		msgs := <-w.data
+		mb.buf = append(msgs, mb.buf...)
+		mb.getCount--
+		mb.getMsgsCount -= int64(len(msgs))
+	}
+	w.state = waiterFree
 }
 
 // GetAll return all messages and flush queue
@@ -272,6 +304,7 @@ func (mb *MB[T]) GetAll() (msgs []T) {
 	mb.buf = nil
 	mb.getCount++
 	mb.getMsgsCount += int64(len(msgs))
+	mb.unlockAdd()
 	mb.mu.Unlock()
 	return
 }
@@ -337,7 +370,8 @@ func (mb *MB[T]) add(msgs ...T) (err error) {
 	}
 	// add to buf
 	mb.buf = append(mb.buf, msgs...)
-	if !mb.paused {
+	mb.addCount++
+	if !mb.paused && mb.readyWaiters > 0 {
 		mb.trySendHeap()
 	}
 	return
@@ -347,18 +381,24 @@ func (mb *MB[T]) trySendHeap() {
 	var sent bool
 	for {
 		heapLen := len(mb.buf)
-		if heapLen == 0 {
+		if heapLen == 0 || mb.readyWaiters == 0 {
 			break
 		}
 		for _, w := range mb.waiters {
 			// they are already sorted by priority
-			if (w.cond.Min < 1 || w.cond.Min <= heapLen) && w.inUse {
+			if (w.cond.Min < 1 || w.cond.Min <= heapLen) && w.state == waiterInUse {
 				var msgs []T
 				if msgs, mb.buf = w.cond.getMessages(mb); len(msgs) > 0 {
+					mb.getCount++
 					mb.getMsgsCount += int64(len(msgs))
+					// an inUse waiter always has an empty channel, the send can't block
 					w.data <- msgs
-					w.inUse = false
+					w.state = waiterSent
+					mb.readyWaiters--
 					sent = true
+					if len(mb.buf) == 0 || mb.readyWaiters == 0 {
+						break
+					}
 					continue
 				}
 			}
@@ -403,8 +443,10 @@ func (mb *MB[T]) Len() (l int) {
 // getMsgsCount - count of issued messages
 func (mb *MB[T]) Stats() (addCount, addMsgsCount, getCount, getMsgsCount int64) {
 	mb.mu.Lock()
-	addCount, addMsgsCount, getCount, getMsgsCount =
-		mb.addCount, mb.addMsgsCount, mb.getCount, mb.getMsgsCount
+	addCount, getCount, getMsgsCount = mb.addCount, mb.getCount, mb.getMsgsCount
+	// every added message is either still in the buf or already counted as issued,
+	// so the added messages count is derived instead of being tracked on the hot Add path
+	addMsgsCount = getMsgsCount + int64(len(mb.buf))
 	mb.mu.Unlock()
 	return
 }
@@ -422,6 +464,8 @@ func (mb *MB[T]) Close() (err error) {
 	if !mb.paused {
 		mb.trySendHeap()
 	}
+	// wake up the Add calls blocked on the full queue, so they can return ErrClosed
+	mb.unlockAdd()
 	for _, w := range mb.waiters {
 		close(w.data)
 	}

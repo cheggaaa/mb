@@ -473,16 +473,16 @@ func TestTimeLimit(t *testing.T) {
 	defer mb.Close()
 	mb.Add(ctx, 1, 3, 4, 5, 6)
 
-	ctx = CtxWithTimeLimit(ctx, time.Millisecond*100)
+	tctx := CtxWithTimeLimit(ctx, time.Millisecond*100)
 	cond := mb.NewCond().WithMin(3).WithMax(3)
-	res, err := cond.Wait(ctx)
+	res, err := cond.Wait(tctx)
 	if err != nil {
 		t.Error(err)
 	}
 	if len(res) != 3 {
 		t.Error("should be 3")
 	}
-	res, err = cond.Wait(ctx)
+	res, err = cond.Wait(tctx)
 	if err != nil {
 		t.Error(err)
 	}
@@ -491,7 +491,7 @@ func TestTimeLimit(t *testing.T) {
 	}
 	var done = make(chan []int)
 	go func() {
-		res, _ = cond.Wait(ctx)
+		res, _ = cond.Wait(tctx)
 		done <- res
 	}()
 	time.Sleep(time.Millisecond * 200)
